@@ -1,0 +1,8 @@
+download/
+outputs/
+.idea/
+
+
+*.zip
+.codex
+.venv
