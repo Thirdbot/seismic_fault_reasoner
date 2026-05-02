@@ -1,8 +1,8 @@
 download/
 outputs/
 .idea/
-
-
+process_data/fault_detection/
+__pycache__/
 *.zip
 .codex
 .venv
