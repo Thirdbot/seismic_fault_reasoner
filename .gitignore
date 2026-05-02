@@ -1,7 +1,9 @@
 download/
 outputs/
 .idea/
+datasets/
 process_data/fault_detection/
+process_data/interpretation/
 __pycache__/
 *.zip
 .codex
