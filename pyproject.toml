@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "cigvis[viser]>=0.2.0",
     "docling>=2.92.0",
+    "fitz>=0.0.1.dev2",
     "matplotlib>=3.10.9",
     "numpy>=2.2.6",
     "pandas>=2.3.3",
