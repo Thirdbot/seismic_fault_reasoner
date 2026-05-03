@@ -10,7 +10,7 @@ DEFAULT_TASK_TOKENS = ("[interp]", "[fault]", "[seg]")
 class VLM(nn.Module):
     def __init__(self,
                     vision_name="openai/clip-vit-base-patch32",
-                    llm_name="Qwen/Qwen2.5-0.5B-Instruct",
+                    llm_name="HuggingFaceTB/SmolLM-135M",
                     num_query_tokens=32,
                     task_tokens=DEFAULT_TASK_TOKENS,
                     llm_quantization_config=None,
@@ -46,7 +46,10 @@ class VLM(nn.Module):
         )
         if added_tokens:
             old_vocab_size = self.llm.get_input_embeddings().weight.shape[0]
-            self.llm.resize_token_embeddings(len(self.tokenizer))
+            try:
+                self.llm.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
+            except TypeError:
+                self.llm.resize_token_embeddings(len(self.tokenizer))
             eos_token_id = self.tokenizer.eos_token_id
             if eos_token_id is not None:
                 with torch.no_grad():

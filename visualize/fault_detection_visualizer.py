@@ -46,9 +46,23 @@ def make_overlay(image: np.ndarray, mask: np.ndarray, alpha: float) -> np.ndarra
     return rgb
 
 
-def visualize_record(record: dict, output: Path, alpha: float, dpi: int) -> Path:
+def resize_mask(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    if mask.shape == shape:
+        return mask
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ImportError("Pillow is required to resize predicted masks") from exc
+
+    resized = Image.fromarray(mask.astype(np.float32)).resize((shape[1], shape[0]), resample=Image.NEAREST)
+    return np.asarray(resized, dtype=np.float32)
+
+
+def visualize_record(record: dict, output: Path, alpha: float, dpi: int, mask_path: Path | None = None) -> Path:
     image = np.load(record["image_path"]).astype(np.float32)
-    mask = np.load(record["mask_path"]).astype(np.uint8)
+    selected_mask_path = mask_path or Path(record["mask_path"])
+    mask = np.load(selected_mask_path).astype(np.float32)
+    mask = resize_mask(mask, image.shape)
     overlay = make_overlay(image, mask, alpha)
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -58,7 +72,7 @@ def visualize_record(record: dict, output: Path, alpha: float, dpi: int) -> Path
     axes[0].set_title("Original seismic")
 
     axes[1].imshow(mask, cmap="gray", aspect="auto", vmin=0, vmax=1)
-    axes[1].set_title("Fault mask")
+    axes[1].set_title("Fault mask" if mask_path is None else "Predicted fault mask")
 
     axes[2].imshow(overlay, aspect="auto")
     axes[2].set_title("Mask overlay")
@@ -86,6 +100,7 @@ def main() -> None:
     parser.add_argument("--index", type=int, help="Metadata row index to visualize.")
     parser.add_argument("--inline", type=int, help="Inline id to visualize.")
     parser.add_argument("--output", type=Path, help="Output PNG path.")
+    parser.add_argument("--mask", type=Path, help="Optional predicted mask .npy path to overlay instead of ground truth.")
     parser.add_argument("--alpha", type=float, default=0.75, help="Mask overlay alpha.")
     parser.add_argument("--dpi", type=int, default=160, help="Output PNG DPI.")
     args = parser.parse_args()
@@ -93,8 +108,8 @@ def main() -> None:
     records = load_records(args.info)
     record = select_record(records, args.index, args.inline)
     output = args.output or DEFAULT_OUT / f"{record['survey']}_{record['slice_type']}_{record['slice_index']}_mask_overlay.png"
-    output = visualize_record(record, output, args.alpha, args.dpi)
-    print(output.relative_to(ROOT))
+    output = visualize_record(record, output, args.alpha, args.dpi, args.mask)
+    print(output.resolve().relative_to(ROOT))
 
 
 if __name__ == "__main__":

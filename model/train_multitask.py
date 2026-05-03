@@ -36,7 +36,7 @@ def main() -> None:
     parser.add_argument("--val-jsonl", type=Path, default=Path("process_data/multimodal_qa/val.jsonl"))
     parser.add_argument("--output-dir", type=Path, default=Path("model/checkpoints/multitask"))
     parser.add_argument("--vision-name", default="openai/clip-vit-base-patch32")
-    parser.add_argument("--llm-name", default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--llm-name", default="HuggingFaceTB/SmolLM-135M")
     parser.add_argument("--training-mode", choices=["qlora", "frozen"], default="qlora")
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)

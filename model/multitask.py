@@ -299,7 +299,18 @@ def save_checkpoint(model: VLM, output_dir: Path, step: int, epoch: int, metadat
 
 def build_qlora_config() -> BitsAndBytesConfig:
     if not torch.cuda.is_available():
-        raise RuntimeError("QLoRA requires a CUDA GPU because 4-bit bitsandbytes training is not available on CPU.")
+        details = {
+            "torch_version": torch.__version__,
+            "torch_cuda_version": torch.version.cuda,
+            "cuda_device_count": torch.cuda.device_count(),
+            "cuda_available": torch.cuda.is_available(),
+        }
+        raise RuntimeError(
+            "QLoRA requires a CUDA-visible NVIDIA GPU because 4-bit bitsandbytes "
+            f"training is not available on CPU. PyTorch CUDA diagnostics: {details}. "
+            "If this machine has an NVIDIA GPU, install a CUDA-enabled PyTorch wheel "
+            "and verify `nvidia-smi` works in the same shell."
+        )
 
     try:
         import bitsandbytes  # noqa: F401
@@ -359,6 +370,34 @@ def attach_lora_for_loading(model: VLM, checkpoint: dict[str, Any]) -> None:
         task_type="CAUSAL_LM",
     )
     model.llm = get_peft_model(model.llm, lora_config)
+
+
+def load_runtime_state_dict(model: VLM, checkpoint_state: dict[str, torch.Tensor]) -> None:
+    model_state = model.state_dict()
+    loadable = {}
+    skipped = []
+    for key, value in checkpoint_state.items():
+        if "quant_state" in key or key.endswith((".absmax", ".quant_map", ".nested_absmax", ".nested_quant_map")):
+            skipped.append(key)
+            continue
+        if ".base_layer.weight" in key:
+            skipped.append(key)
+            continue
+        if key not in model_state:
+            skipped.append(key)
+            continue
+        if model_state[key].shape != value.shape:
+            skipped.append(key)
+            continue
+        loadable[key] = value
+
+    missing, unexpected = model.load_state_dict(loadable, strict=False)
+    if skipped:
+        print(f"checkpoint load: skipped {len(skipped)} incompatible or quantized keys")
+    if missing:
+        print(f"checkpoint load: missing {len(missing)} model keys after partial load")
+    if unexpected:
+        print(f"checkpoint load: unexpected {len(unexpected)} keys after partial load")
 
 
 def move_trainable_vlm_parts_to_device(model: VLM, device: torch.device) -> None:
@@ -430,7 +469,7 @@ def load_checkpoint(path: Path, device: torch.device) -> tuple[VLM, dict[str, An
         task_tokens=checkpoint.get("task_tokens", ("[interp]", "[fault]", "[seg]")),
     )
     attach_lora_for_loading(model, checkpoint)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    load_runtime_state_dict(model, checkpoint["model_state_dict"])
     model.to(device)
     model.eval()
     return model, checkpoint

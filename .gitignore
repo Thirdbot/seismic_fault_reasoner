@@ -6,6 +6,7 @@ datasets/
 process_data/fault_detection/
 process_data/interpretation/
 process_data/multimodal_qa/
+results/
 __pycache__/
 *.zip
 .codex
