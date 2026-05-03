@@ -51,7 +51,7 @@ def main() -> None:
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--mask-size", type=int, default=224)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--save-every", type=int, default=100)
+    parser.add_argument("--save-every", type=int, default=1000)
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=0)
