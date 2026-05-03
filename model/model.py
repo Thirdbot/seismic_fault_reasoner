@@ -7,6 +7,60 @@ import torch.nn.functional as F
 DEFAULT_TASK_TOKENS = ("[interp]", "[fault]", "[seg]")
 
 
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.GELU(),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class UpBlock(nn.Module):
+    def __init__(self, in_channels, skip_channels, out_channels):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+        self.conv = ConvBlock(out_channels + skip_channels, out_channels)
+
+    def forward(self, x, skip):
+        x = self.up(x)
+        if x.shape[-2:] != skip.shape[-2:]:
+            x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
+        return self.conv(torch.cat([x, skip], dim=1))
+
+
+class UNetSegmentationDecoder(nn.Module):
+    def __init__(self, vision_hidden: int):
+        super().__init__()
+        self.enc0 = ConvBlock(3, 32)
+        self.skip0 = nn.Conv2d(32, 32, kernel_size=1)
+        self.skip1 = nn.Conv2d(32, 64, kernel_size=1)
+        self.skip2 = nn.Conv2d(32, 128, kernel_size=1)
+        self.patch_proj = nn.Conv2d(vision_hidden, 256, kernel_size=1)
+        self.up1 = UpBlock(256, 128, 128)
+        self.up2 = UpBlock(128, 64, 64)
+        self.up3 = UpBlock(64, 32, 32)
+        self.out = nn.Conv2d(32, 1, kernel_size=1)
+
+    def forward(self, pixel_values, patch_embeds):
+        high = self.enc0(pixel_values)
+        skip0 = self.skip0(high)
+        skip1 = self.skip1(F.avg_pool2d(high, kernel_size=2, stride=2))
+        skip2 = self.skip2(F.avg_pool2d(high, kernel_size=4, stride=4))
+        x = self.patch_proj(patch_embeds)
+        x = self.up1(x, skip2)
+        x = self.up2(x, skip1)
+        x = self.up3(x, skip0)
+        return self.out(x)
+
+
 class VLM(nn.Module):
     def __init__(self,
                     vision_name="openai/clip-vit-base-patch32",
@@ -83,16 +137,7 @@ class VLM(nn.Module):
 
         # Project from Image Query Token to llm layers
         self.visual_projection = nn.Linear(self.QformerConfig.hidden_size, llm_hidden)
-        self.segmentation_decoder = nn.Sequential(
-            nn.Linear(self.QformerConfig.hidden_size, 14 * 14 * 64),
-            nn.GELU(),
-            nn.Unflatten(1, (64, 14, 14)),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(16, 1, kernel_size=3, padding=1),
-        )
+        self.segmentation_decoder = UNetSegmentationDecoder(vision_hidden)
 
         # Recommended at first: freeze big models
         for p in self.vision_encoder.parameters():
@@ -138,9 +183,16 @@ class VLM(nn.Module):
         return query_output
 
     def segment(self, pixel_values, output_size=None):
-        query_output = self._qformer_output(pixel_values)
-        pooled_query = query_output.mean(dim=1)
-        logits = self.segmentation_decoder(pooled_query)
+        vision_outputs = self.vision_encoder(pixel_values=pixel_values)
+        patch_tokens = vision_outputs.last_hidden_state[:, 1:, :]
+        grid_size = int(patch_tokens.shape[1] ** 0.5)
+        patch_embeds = patch_tokens.transpose(1, 2).reshape(
+            pixel_values.shape[0],
+            -1,
+            grid_size,
+            grid_size,
+        )
+        logits = self.segmentation_decoder(pixel_values, patch_embeds)
         if output_size is not None:
             logits = F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)
         return logits
