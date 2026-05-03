@@ -18,6 +18,7 @@ class FaultDetectionDataset(Dataset):
         transform: Optional[Callable] = None,
         crop_size: Optional[tuple[int, int]] = None,
         center_crop: bool = False,
+        positive_crop_prob: float = 0.75,
         resize: Optional[tuple[int, int]] = None,
         mmap: bool = False,
     ):
@@ -26,6 +27,7 @@ class FaultDetectionDataset(Dataset):
         self.transform = transform
         self.crop_size = crop_size
         self.center_crop = center_crop
+        self.positive_crop_prob = positive_crop_prob
         self.resize = resize
         self.mmap = mmap
 
@@ -77,6 +79,9 @@ class FaultDetectionDataset(Dataset):
         }
 
     def _load_npy(self, path: str, dtype) -> np.ndarray:
+        path = Path(path)
+        if not path.is_absolute() and not path.exists():
+            path = self.root / path
         array = np.load(path, mmap_mode="r" if self.mmap else None)
         return np.asarray(array, dtype=dtype)
 
@@ -92,11 +97,22 @@ class FaultDetectionDataset(Dataset):
         if self.center_crop:
             top = (height - crop_h) // 2
             left = (width - crop_w) // 2
+        elif mask.any() and np.random.random() < self.positive_crop_prob:
+            ys, xs = np.nonzero(mask)
+            index = np.random.randint(0, len(xs))
+            top = self._crop_start_around(int(ys[index]), crop_h, height)
+            left = self._crop_start_around(int(xs[index]), crop_w, width)
         else:
             top = np.random.randint(0, height - crop_h + 1)
             left = np.random.randint(0, width - crop_w + 1)
 
         return image[top:top + crop_h, left:left + crop_w], mask[top:top + crop_h, left:left + crop_w]
+
+    @staticmethod
+    def _crop_start_around(center: int, crop_length: int, full_length: int) -> int:
+        low = max(0, center - crop_length + 1)
+        high = min(center, full_length - crop_length)
+        return int(np.random.randint(low, high + 1))
 
     @staticmethod
     def _to_tensor(array) -> torch.Tensor:
@@ -162,6 +178,9 @@ class InterpretationDataset(Dataset):
         except ImportError as exc:
             raise ImportError("Pillow is required to load interpretation images") from exc
 
+        path = Path(path)
+        if not path.is_absolute() and not path.exists():
+            path = self.root / path
         image = Image.open(path).convert("RGB")
         if self.image_size is not None:
             image = image.resize((self.image_size[1], self.image_size[0]))
@@ -192,7 +211,9 @@ def collect_interpretation_records(
             if manifest_path.exists():
                 for record in read_jsonl(manifest_path):
                     caption = record.get("caption", "")
-                    context = record.get("same_page_text", "")
+                    context = "\n".join(
+                        item["text"] for item in record.get("nearby_text_before", []) + record.get("nearby_text_after", [])
+                    )
                     records.append({
                         **record,
                         "kind": "media",

@@ -1,10 +1,13 @@
 download/
 outputs/
+model/checkpoints/
 .idea/
 datasets/
 process_data/fault_detection/
 process_data/interpretation/
+process_data/multimodal_qa/
 __pycache__/
 *.zip
 .codex
 .venv
+.env

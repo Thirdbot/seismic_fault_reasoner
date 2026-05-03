@@ -1,317 +1,221 @@
+import argparse
 import json
+from pathlib import Path
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
-import fitz
-from pathlib import Path
-
 from docling_core.types.doc import PictureItem, TableItem
 from tqdm import tqdm
 
 
-class seismic_interpretation_DataBuider:
+class SeismicInterpretationDataBuilder:
     def __init__(self):
-        self.root = Path(__file__).parent.parent.absolute()
-        self.parent = Path(__file__).parent.absolute()
-        self.data_path = self.root / 'data' / 'download'
-        self.report_path = self.data_path / 'reports' / 'Reports' / 'data'
-        self.pdf1 = self.report_path / 'Statoil internal report on Smeaheia Subsurface 2016 - selected extracts.pdf'
-        self.pdf2 = self.report_path / 'Troll_kystnaer_subsurface_status_report final_Gassnova.pdf'
-        self.converter = DocumentConverter()
-        self.image_path = self.parent / 'interpretation'
-        self.image_path.mkdir(parents=True, exist_ok=True)
-        self.extracted_output_path = self.parent / 'interpretation' / "extracted_data"
+        self.root = Path(__file__).resolve().parent.parent
+        self.output_root = Path(__file__).resolve().parent / "interpretation"
+        self.reports_dir = self.root / "data" / "download" / "reports" / "Reports" / "data"
+        self.pdf_paths = [
+            self.reports_dir / "Statoil internal report on Smeaheia Subsurface 2016 - selected extracts.pdf",
+            self.reports_dir / "Troll_kystnaer_subsurface_status_report final_Gassnova.pdf",
+        ]
+        self.extracted_output_path = self.output_root / "extracted_data"
         self.extracted_output_path.mkdir(parents=True, exist_ok=True)
 
-    def safe_get_page_and_bbox(self,element):
+    @staticmethod
+    def _converter() -> DocumentConverter:
+        options = PdfPipelineOptions()
+        options.images_scale = 2.0
+        options.generate_picture_images = True
+        options.generate_table_images = True
+        return DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+        )
+
+    @staticmethod
+    def _page_and_bbox(element):
         if not getattr(element, "prov", None):
             return None, None
 
         prov = element.prov[0]
-        page_no = getattr(prov, "page_no", None)
-
-        bbox = None
-        if getattr(prov, "bbox", None) is not None:
+        bbox = getattr(prov, "bbox", None)
+        if bbox is not None:
             try:
-                bbox = prov.bbox.model_dump()
+                bbox = bbox.model_dump()
             except Exception:
-                bbox = str(prov.bbox)
+                bbox = str(bbox)
+        return getattr(prov, "page_no", None), bbox
 
-        return page_no, bbox
-
-    def safe_get_text(self,element):
-        for attr in ["text", "orig", "content"]:
+    @staticmethod
+    def _text(element) -> str:
+        for attr in ("text", "orig", "content"):
             value = getattr(element, attr, None)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-
         return ""
 
-    def safe_get_caption(self,element, document):
+    @staticmethod
+    def _caption(element, document) -> str:
         try:
-            caption = element.caption_text(document)
-            if caption:
-                return caption.strip()
+            return (element.caption_text(document) or "").strip()
         except Exception:
-            pass
+            return ""
 
-        return ""
-
-    def looks_like_heading(self,element, text):
+    @staticmethod
+    def _is_heading(element, text: str) -> bool:
         name = type(element).__name__.lower()
+        return "section" in name or "heading" in name or "title" in name or (text[:2].isdigit() and len(text) < 120)
 
-        if "section" in name or "heading" in name or "title" in name:
-            return True
+    def _document_items(self, document):
+        items = []
+        chunks = []
+        section_path = []
 
-        # Backup heuristic for numbered report sections
-        if text[:2].isdigit() and len(text) < 120:
-            return True
+        for index, (element, level) in enumerate(document.iterate_items()):
+            page, bbox = self._page_and_bbox(element)
+            text = self._text(element)
 
-        return False
+            if text and self._is_heading(element, text):
+                level_int = int(level) if isinstance(level, int) else len(section_path)
+                section_path = [text] if level_int <= 0 else [*section_path[:level_int], text]
 
-    def extract_data(self):
-        pipeline_options = PdfPipelineOptions()
-        pipeline_options.images_scale = 2.0
-        pipeline_options.generate_picture_images = True
-        pipeline_options.generate_table_images = True  # if your version supports it
-
-        converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            record = {
+                "index": index,
+                "element": element,
+                "page": page,
+                "bbox": bbox,
+                "text": text,
+                "section_path": list(section_path),
+                "self_ref": getattr(element, "self_ref", None),
             }
-        )
+            items.append(record)
 
-        for pdf in tqdm([self.pdf1, self.pdf2]):
-            doc = self.converter.convert(source=pdf)
-            markdown = doc.document.export_to_markdown()
-            (self.extracted_output_path / f"{pdf.name.replace('.pdf', '.md')}").write_text(markdown,encoding="utf-8")
+            if text and not isinstance(element, (PictureItem, TableItem)):
+                chunk_id = f"txt_{len(chunks) + 1:05d}"
+                chunks.append({
+                    "chunk_id": chunk_id,
+                    "type": "text",
+                    "page": page,
+                    "bbox": bbox,
+                    "section_path": list(section_path),
+                    "text": text,
+                    "docling_self_ref": getattr(element, "self_ref", None),
+                    "source_index": index,
+                })
+                record["chunk_id"] = chunk_id
 
-            sub_image_path = (self.image_path / f"{pdf.name.removesuffix('.pdf')}") / 'images'
-            manifest_path =  (self.image_path / f"{pdf.name.removesuffix('.pdf')}") / 'manifest.jsonl'
-            chunks_path = (self.image_path / f"{pdf.name.removesuffix('.pdf')}") / "chunks.jsonl"
-            sub_image_path.mkdir(parents=True, exist_ok=True)
+        return items, chunks
+
+    @staticmethod
+    def _context(items, source_index, page, window=4):
+        def useful(item):
+            return item.get("text") and not isinstance(item["element"], (PictureItem, TableItem))
+
+        before = [
+            {"chunk_id": item.get("chunk_id"), "page": item.get("page"), "text": item["text"]}
+            for item in reversed(items[:source_index])
+            if useful(item)
+        ][:window]
+        before.reverse()
+
+        after = [
+            {"chunk_id": item.get("chunk_id"), "page": item.get("page"), "text": item["text"]}
+            for item in items[source_index + 1:]
+            if useful(item)
+        ][:window]
+
+        same_page_text = "\n".join(item["text"] for item in items if item.get("page") == page and useful(item))
+        linked_chunk_ids = [item["chunk_id"] for item in before + after if item.get("chunk_id")]
+        return {
+            "nearby_text_before": before,
+            "nearby_text_after": after,
+            "same_page_text": same_page_text,
+            "linked_chunk_ids": linked_chunk_ids,
+        }
+
+    def _write_jsonl(self, path: Path, records: list[dict]) -> None:
+        with path.open("w", encoding="utf-8") as file:
+            for record in records:
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def extract_data(self, pdf_paths=None) -> None:
+        converter = self._converter()
+        for pdf in tqdm(pdf_paths or self.pdf_paths):
+            if not pdf.exists():
+                raise FileNotFoundError(f"PDF not found: {pdf}")
+
             doc_id = pdf.stem
+            doc_dir = self.output_root / doc_id
+            image_dir = doc_dir / "images"
+            image_dir.mkdir(parents=True, exist_ok=True)
 
-            result = converter.convert(pdf)
-            document = result.document
-            markdown = document.export_to_markdown()
-
-            self.extracted_output_path.mkdir(parents=True, exist_ok=True)
+            document = converter.convert(pdf).document
             (self.extracted_output_path / f"{doc_id}.md").write_text(
-                markdown,
-                encoding="utf-8"
+                document.export_to_markdown(),
+                encoding="utf-8",
             )
 
-            # Flatten document items once
-            linear_items = []
-            text_chunks = []
-            section_path = []
-            text_count = 0
-
-            for idx, (element, level) in enumerate(document.iterate_items()):
-                page_no, bbox = self.safe_get_page_and_bbox(element)
-                text = self.safe_get_text(element)
-                item_type = type(element).__name__
-
-                if text and self.looks_like_heading(element, text):
-                    # Simple section tracking
-                    level_int = int(level) if isinstance(level, int) else len(section_path)
-
-                    if level_int <= 0:
-                        section_path = [text]
-                    else:
-                        section_path = section_path[:level_int]
-                        section_path.append(text)
-
-                item_record = {
-                    "index": idx,
-                    "element": element,
-                    "type": item_type,
-                    "page": page_no,
-                    "bbox": bbox,
-                    "text": text,
-                    "section_path": list(section_path),
-                    "self_ref": getattr(element, "self_ref", None),
-                }
-
-                linear_items.append(item_record)
-
-                # Save normal text chunks separately
-                if text and not isinstance(element, (PictureItem, TableItem)):
-                    text_count += 1
-                    chunk_id = f"txt_{text_count:05d}"
-
-                    chunk_record = {
-                        "doc_id": doc_id,
-                        "chunk_id": chunk_id,
-                        "type": "text",
-                        "page": page_no,
-                        "bbox": bbox,
-                        "section_path": list(section_path),
-                        "text": text,
-                        "docling_self_ref": getattr(element, "self_ref", None),
-                        "source_index": idx,
-                    }
-
-                    text_chunks.append(chunk_record)
-                    item_record["chunk_id"] = chunk_id
-
-            def get_nearby_context(source_index, page_no, window=4):
-                before = []
-                after = []
-
-                # previous useful text chunks
-                for item in reversed(linear_items[:source_index]):
-                    if item.get("text") and not isinstance(item["element"], (PictureItem, TableItem)):
-                        before.append({
-                            "chunk_id": item.get("chunk_id"),
-                            "page": item.get("page"),
-                            "text": item["text"],
-                        })
-                    if len(before) >= window:
-                        break
-
-                before = list(reversed(before))
-
-                # next useful text chunks
-                for item in linear_items[source_index + 1:]:
-                    if item.get("text") and not isinstance(item["element"], (PictureItem, TableItem)):
-                        after.append({
-                            "chunk_id": item.get("chunk_id"),
-                            "page": item.get("page"),
-                            "text": item["text"],
-                        })
-                    if len(after) >= window:
-                        break
-
-                # same page text
-                same_page = []
-                for item in linear_items:
-                    if item.get("page") == page_no and item.get("text"):
-                        if not isinstance(item["element"], (PictureItem, TableItem)):
-                            same_page.append(item["text"])
-
-                same_page_text = "".join(same_page)
-
-                linked_chunk_ids = []
-                for ctx in before + after:
-                    if ctx.get("chunk_id"):
-                        linked_chunk_ids.append(ctx["chunk_id"])
-
-                return {
-                    "nearby_text_before": before,
-                    "nearby_text_after": after,
-                    "same_page_text": same_page_text,
-                    "linked_chunk_ids": linked_chunk_ids,
-                }
+            items, chunks = self._document_items(document)
+            for chunk in chunks:
+                chunk["doc_id"] = doc_id
 
             media_records = []
-            figure_count = 0
-            table_count = 0
-            skipped_no_caption = 0
-
-            for item in tqdm(linear_items, desc=f"Media: {doc_id}"):
+            counts = {"figure": 0, "table": 0, "skipped": 0}
+            for item in tqdm(items, desc=f"Media: {doc_id}"):
                 element = item["element"]
+                if not isinstance(element, (PictureItem, TableItem)):
+                    continue
 
-                if isinstance(element, PictureItem):
-                    caption = self.safe_get_caption(element, document)
+                caption = self._caption(element, document)
+                if not caption:
+                    counts["skipped"] += 1
+                    continue
 
-                    # Main logo filter:
-                    # if there is no caption, do not save it.
-                    if not caption:
-                        skipped_no_caption += 1
-                        continue
+                image = element.get_image(document)
+                if image is None:
+                    counts["skipped"] += 1
+                    continue
 
-                    image = element.get_image(document)
-                    if image is None:
-                        continue
+                media_type = "figure" if isinstance(element, PictureItem) else "table"
+                if media_type == "figure" and (image.size[0] < 100 or image.size[1] < 80):
+                    counts["skipped"] += 1
+                    continue
 
-                    # Optional small-logo/icon filter
-                    w, h = image.size
-                    if w < 100 or h < 80:
-                        skipped_no_caption += 1
-                        continue
+                counts[media_type] += 1
+                element_id = f"{'fig' if media_type == 'figure' else 'table'}_{counts[media_type]:04d}"
+                image_path = image_dir / f"{element_id}.png"
+                image.save(image_path)
 
-                    figure_count += 1
-                    element_id = f"fig_{figure_count:04d}"
-                    image_path = sub_image_path / f"{element_id}.png"
-                    image.save(image_path)
+                media_records.append({
+                    "doc_id": doc_id,
+                    "element_id": element_id,
+                    "docling_self_ref": item["self_ref"],
+                    "type": media_type,
+                    "page": item["page"],
+                    "bbox": item["bbox"],
+                    "section_path": item["section_path"],
+                    "caption": caption,
+                    "image_path": image_path.as_posix(),
+                    **self._context(items, item["index"], item["page"]),
+                })
 
-                    context = get_nearby_context(
-                        source_index=item["index"],
-                        page_no=item["page"],
-                        window=4
-                    )
-
-                    media_records.append({
-                        "doc_id": doc_id,
-                        "element_id": element_id,
-                        "docling_self_ref": item["self_ref"],
-                        "type": "figure",
-                        "page": item["page"],
-                        "bbox": item["bbox"],
-                        "section_path": item["section_path"],
-                        "caption": caption,
-                        "image_path": str(image_path),
-                        **context,
-                    })
-
-                elif isinstance(element, TableItem):
-                    caption = self.safe_get_caption(element, document)
-
-                    # You can choose whether to keep captionless tables.
-                    # For now, same rule: skip if no caption.
-                    if not caption:
-                        skipped_no_caption += 1
-                        continue
-
-                    image = element.get_image(document)
-                    if image is None:
-                        continue
-
-                    table_count += 1
-                    element_id = f"table_{table_count:04d}"
-                    image_path = sub_image_path / f"{element_id}.png"
-                    image.save(image_path)
-
-                    context = get_nearby_context(
-                        source_index=item["index"],
-                        page_no=item["page"],
-                        window=4
-                    )
-
-                    media_records.append({
-                        "doc_id": doc_id,
-                        "element_id": element_id,
-                        "docling_self_ref": item["self_ref"],
-                        "type": "table",
-                        "page": item["page"],
-                        "bbox": item["bbox"],
-                        "section_path": item["section_path"],
-                        "caption": caption,
-                        "image_path": str(image_path),
-                        **context,
-                    })
-
-            # Save text chunks
-            with chunks_path.open("w", encoding="utf-8") as f:
-                for record in text_chunks:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-            # Save figure/table manifest
-            with manifest_path.open("w", encoding="utf-8") as f:
-                for record in media_records:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._write_jsonl(doc_dir / "chunks.jsonl", chunks)
+            self._write_jsonl(doc_dir / "manifest.jsonl", media_records)
 
             print(f"\nPDF: {pdf.name}")
-            print(f"Saved figures: {figure_count}")
-            print(f"Saved tables: {table_count}")
-            print(f"Skipped no-caption/small images: {skipped_no_caption}")
-            print(f"Chunks: {chunks_path}")
-            print(f"Manifest: {manifest_path}")
+            print(f"Saved figures: {counts['figure']}")
+            print(f"Saved tables: {counts['table']}")
+            print(f"Skipped media: {counts['skipped']}")
+            print(f"Chunks: {doc_dir / 'chunks.jsonl'}")
+            print(f"Manifest: {doc_dir / 'manifest.jsonl'}")
+
+
+seismic_interpretation_DataBuider = SeismicInterpretationDataBuilder
 
 
 if __name__ == "__main__":
-    seismic_interpretation = seismic_interpretation_DataBuider()
-    seismic_interpretation.extract_data()
+    parser = argparse.ArgumentParser(description="Extract report text, figures, and tables for interpretation.")
+    parser.add_argument("--pdf", type=Path, action="append", help="PDF path to extract. Defaults to bundled reports.")
+    args = parser.parse_args()
+
+    builder = SeismicInterpretationDataBuilder()
+    builder.extract_data(args.pdf)

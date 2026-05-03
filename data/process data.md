@@ -31,7 +31,10 @@ So , first extrack parsing and extracting position , Then map to seismic 2d data
 
 #### TNE01 is 3d seismics data , but not be use for training since it has no direct fault labels , but possible for validation
 
-## CONTEXT Understanding
+### CONTEXT Understanding
 ### for context in PDF's report to understand images data. 
 My Idea is to extracted reference images from reports with its underline explanation into multimodal datasets
 
+## For task-specified Datasets
+- Fault Detection need to become QA pairs with new token [seg] for model to be able to understand
+- Seismic Interpretation need to become QA pairs for finetune

@@ -3,13 +3,25 @@ name = "vistrans"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
+    "accelerate>=1.0.0",
     "cigvis[viser]>=0.2.0",
     "docling>=2.92.0",
-    "fitz>=0.0.1.dev2",
+    "llama-index>=0.14.21",
+    "llama-index-llms-openai>=0.7.7",
     "matplotlib>=3.10.9",
     "numpy>=2.2.6",
     "pandas>=2.3.3",
+    "peft>=0.15.0",
+    "pillow>=11.0.0",
     "scipy>=1.15.3",
     "segyio>=1.9.14",
     "tifffile>=2025.5.10",
+    "torch>=2.0.0",
+    "tqdm>=4.66.0",
+    "transformers>=4.46.0",
+]
+
+[project.optional-dependencies]
+qlora = [
+    "bitsandbytes>=0.43.0; platform_system == 'Linux'",
 ]
