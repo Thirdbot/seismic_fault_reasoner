@@ -1,6 +1,7 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, CLIPVisionModel, Blip2QFormerConfig, Blip2QFormerModel
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 DEFAULT_TASK_TOKENS = ("[interp]", "[fault]", "[seg]")
@@ -79,6 +80,16 @@ class VLM(nn.Module):
 
         # Project from Image Query Token to llm layers
         self.visual_projection = nn.Linear(self.QformerConfig.hidden_size, llm_hidden)
+        self.segmentation_decoder = nn.Sequential(
+            nn.Linear(self.QformerConfig.hidden_size, 14 * 14 * 64),
+            nn.GELU(),
+            nn.Unflatten(1, (64, 14, 14)),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+            nn.GELU(),
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.GELU(),
+            nn.Conv2d(16, 1, kernel_size=3, padding=1),
+        )
 
         # Recommended at first: freeze big models
         for p in self.vision_encoder.parameters():
@@ -97,6 +108,13 @@ class VLM(nn.Module):
         return f"{task_token} {question}"
 
     def _visual_embeds(self, pixel_values, dtype=None):
+        query_output = self._qformer_output(pixel_values)
+        visual_embeds = self.visual_projection(query_output)
+        if dtype is not None:
+            visual_embeds = visual_embeds.to(dtype=dtype)
+        return visual_embeds
+
+    def _qformer_output(self, pixel_values):
         batch_size = pixel_values.shape[0]
         vision_outputs = self.vision_encoder(pixel_values=pixel_values)
         image_embeds = vision_outputs.last_hidden_state
@@ -114,11 +132,15 @@ class VLM(nn.Module):
             encoder_attention_mask=image_attention_mask,
         )
         query_output = qformer_outputs.last_hidden_state
+        return query_output
 
-        visual_embeds = self.visual_projection(query_output)
-        if dtype is not None:
-            visual_embeds = visual_embeds.to(dtype=dtype)
-        return visual_embeds
+    def segment(self, pixel_values, output_size=None):
+        query_output = self._qformer_output(pixel_values)
+        pooled_query = query_output.mean(dim=1)
+        logits = self.segmentation_decoder(pooled_query)
+        if output_size is not None:
+            logits = F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)
+        return logits
 
     def forward(self, pixel_values, input_ids, attention_mask, labels=None):
         text_embeds = self.llm.get_input_embeddings()(input_ids)
