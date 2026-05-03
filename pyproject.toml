@@ -11,8 +11,10 @@ dependencies = [
     "pandas>=2.3.3",
     "peft>=0.15.0",
     "pillow>=11.0.0",
+    "protobuf>=4.25.0",
     "scipy>=1.15.3",
     "segyio>=1.9.14",
+    "sentencepiece>=0.2.0",
     "tifffile>=2025.5.10",
     "torch>=2.0.0",
     "tqdm>=4.66.0",
@@ -22,4 +24,8 @@ dependencies = [
 [project.optional-dependencies]
 qlora = [
     "bitsandbytes>=0.43.0; platform_system == 'Linux'",
+]
+synthetic = [
+    "llama-index-core>=0.12.0",
+    "llama-index-llms-anthropic>=0.6.0",
 ]

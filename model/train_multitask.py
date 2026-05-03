@@ -17,6 +17,8 @@ from multitask import (
     compute_multitask_loss,
     count_trainable_parameters,
     evaluate,
+    latest_checkpoint,
+    load_runtime_state_dict,
     parse_lora_targets,
     save_checkpoint,
     to_device,
@@ -59,6 +61,9 @@ def main() -> None:
     parser.add_argument("--text-loss-weight", type=float, default=1.0)
     parser.add_argument("--balance-tasks", action="store_true")
     parser.add_argument("--results-dir", type=Path, default=Path("results/multitask"))
+    parser.add_argument("--resume", action="store_true", help="Resume from the latest checkpoint in --output-dir.")
+    parser.add_argument("--resume-checkpoint", type=Path, default=None, help="Resume from a specific pytorch_model.pt checkpoint.")
+    parser.add_argument("--reset-metrics", action="store_true", help="Overwrite metrics.jsonl instead of appending on resume.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -136,24 +141,52 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.results_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = args.results_dir / "metrics.jsonl"
-    metrics_path.write_text("", encoding="utf-8")
-    log_metrics(metrics_path, {
-        "type": "config",
-        "training_mode": args.training_mode,
-        "epochs": args.epochs,
-        "batch_size": args.batch_size,
-        "grad_accum_steps": args.grad_accum_steps,
-        "max_steps": args.max_steps,
-        "lr": args.lr,
-        "balance_tasks": args.balance_tasks,
-        "train_records": len(train_dataset),
-        "val_records": len(val_dataset),
-        "trainable_parameters": trainable_count,
-        "total_parameters": total_count,
-    })
     global_step = 0
+    start_epoch = 1
+    resume_path = args.resume_checkpoint
+    if args.resume and resume_path is None:
+        resume_path = latest_checkpoint(args.output_dir)
+    if resume_path is not None:
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        load_runtime_state_dict(model, checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        else:
+            print("resume warning: checkpoint has no optimizer_state_dict; optimizer starts fresh")
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        else:
+            print("resume warning: checkpoint has no scheduler_state_dict; scheduler starts fresh")
+        global_step = int(checkpoint.get("step", 0))
+        start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        print(f"resumed from {resume_path} at epoch={checkpoint.get('epoch')} step={global_step}")
+
+    if not resume_path or args.reset_metrics or not metrics_path.exists():
+        metrics_path.write_text("", encoding="utf-8")
+        log_metrics(metrics_path, {
+            "type": "config",
+            "training_mode": args.training_mode,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "grad_accum_steps": args.grad_accum_steps,
+            "max_steps": args.max_steps,
+            "lr": args.lr,
+            "balance_tasks": args.balance_tasks,
+            "train_records": len(train_dataset),
+            "val_records": len(val_dataset),
+            "trainable_parameters": trainable_count,
+            "total_parameters": total_count,
+        })
+    else:
+        log_metrics(metrics_path, {
+            "type": "resume",
+            "checkpoint": str(resume_path),
+            "start_epoch": start_epoch,
+            "step": global_step,
+        })
+
     optimizer.zero_grad(set_to_none=True)
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         progress = tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}")
         for micro_step, batch in enumerate(progress, start=1):
             batch = to_device(batch, device)
@@ -187,7 +220,7 @@ def main() -> None:
                     **val_metrics,
                 })
             if args.save_every > 0 and global_step % args.save_every == 0:
-                save_checkpoint(model, args.output_dir, global_step, epoch, checkpoint_metadata)
+                save_checkpoint(model, args.output_dir, global_step, epoch, checkpoint_metadata, optimizer, scheduler)
             if args.max_steps > 0 and global_step >= args.max_steps:
                 val_metrics = evaluate(model, val_loader, device, args.seg_loss_weight, args.text_loss_weight)
                 print(f"max_steps reached at step={global_step}; val={val_metrics}")
@@ -197,7 +230,7 @@ def main() -> None:
                     "step": global_step,
                     **val_metrics,
                 })
-                save_checkpoint(model, args.output_dir, global_step, epoch, checkpoint_metadata)
+                save_checkpoint(model, args.output_dir, global_step, epoch, checkpoint_metadata, optimizer, scheduler)
                 return
 
         if len(train_loader) % args.grad_accum_steps != 0:
@@ -215,7 +248,7 @@ def main() -> None:
             "step": global_step,
             **val_metrics,
         })
-        save_checkpoint(model, args.output_dir, global_step, epoch, checkpoint_metadata)
+        save_checkpoint(model, args.output_dir, global_step, epoch, checkpoint_metadata, optimizer, scheduler)
 
 
 if __name__ == "__main__":

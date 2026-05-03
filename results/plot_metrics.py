@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 
 
 LOSS_KEYS = ("loss", "text_loss", "seg_loss")
-SCORE_KEYS = ("seg_dice", "seg_iou")
+SCORE_KEYS = ("seg_dice", "seg_iou", "seg_dice_positive", "seg_iou_positive")
+RATIO_KEYS = ("seg_pred_positive_ratio", "seg_target_positive_ratio", "seg_positive_mask_ratio")
 
 
 def read_metrics(path: Path) -> list[dict]:
@@ -67,6 +68,8 @@ def main() -> None:
         outputs.append(args.output_dir / "val_loss.png")
     if plot_series(val_rows, SCORE_KEYS, "Validation Segmentation Metrics", args.output_dir / "val_segmentation.png"):
         outputs.append(args.output_dir / "val_segmentation.png")
+    if plot_series(val_rows, RATIO_KEYS, "Validation Segmentation Ratios", args.output_dir / "val_segmentation_ratios.png"):
+        outputs.append(args.output_dir / "val_segmentation_ratios.png")
 
     if not outputs:
         raise ValueError(f"No plottable train/val rows found in {args.metrics}")

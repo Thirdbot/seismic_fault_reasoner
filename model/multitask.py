@@ -189,13 +189,28 @@ def dice_loss(logits: torch.Tensor, targets: torch.Tensor, eps: float = 1e-6) ->
 def segmentation_metrics(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5) -> dict[str, float]:
     preds = torch.sigmoid(logits) >= threshold
     targets_bool = targets >= 0.5
-    intersection = (preds & targets_bool).sum().float()
-    union = (preds | targets_bool).sum().float()
-    pred_sum = preds.sum().float()
-    target_sum = targets_bool.sum().float()
-    dice = (2 * intersection / (pred_sum + target_sum).clamp_min(1)).item()
-    iou = (intersection / union.clamp_min(1)).item()
-    return {"seg_dice": dice, "seg_iou": iou}
+    dims = tuple(range(1, preds.ndim))
+
+    intersection = (preds & targets_bool).sum(dim=dims).float()
+    union = (preds | targets_bool).sum(dim=dims).float()
+    pred_sum = preds.sum(dim=dims).float()
+    target_sum = targets_bool.sum(dim=dims).float()
+
+    has_target = target_sum > 0
+    dice_per_item = 2 * intersection / (pred_sum + target_sum).clamp_min(1)
+    iou_per_item = intersection / union.clamp_min(1)
+
+    positive_dice = dice_per_item[has_target].mean().item() if has_target.any() else 0.0
+    positive_iou = iou_per_item[has_target].mean().item() if has_target.any() else 0.0
+    return {
+        "seg_dice": dice_per_item.mean().item(),
+        "seg_iou": iou_per_item.mean().item(),
+        "seg_dice_positive": positive_dice,
+        "seg_iou_positive": positive_iou,
+        "seg_pred_positive_ratio": preds.float().mean().item(),
+        "seg_target_positive_ratio": targets_bool.float().mean().item(),
+        "seg_positive_mask_ratio": has_target.float().mean().item(),
+    }
 
 
 def to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -232,7 +247,15 @@ def compute_multitask_loss(
         metrics = segmentation_metrics(seg_logits.detach(), seg_targets.detach())
     else:
         seg_loss = torch.zeros((), device=batch["pixel_values"].device)
-        metrics = {"seg_dice": 0.0, "seg_iou": 0.0}
+        metrics = {
+            "seg_dice": 0.0,
+            "seg_iou": 0.0,
+            "seg_dice_positive": 0.0,
+            "seg_iou_positive": 0.0,
+            "seg_pred_positive_ratio": 0.0,
+            "seg_target_positive_ratio": 0.0,
+            "seg_positive_mask_ratio": 0.0,
+        }
 
     loss = text_loss_weight * text_loss + seg_loss_weight * seg_loss
     metrics.update({
@@ -251,7 +274,18 @@ def evaluate(
     text_loss_weight: float = 1.0,
 ) -> dict[str, float]:
     model.eval()
-    totals = {"loss": 0.0, "text_loss": 0.0, "seg_loss": 0.0, "seg_dice": 0.0, "seg_iou": 0.0}
+    totals = {
+        "loss": 0.0,
+        "text_loss": 0.0,
+        "seg_loss": 0.0,
+        "seg_dice": 0.0,
+        "seg_iou": 0.0,
+        "seg_dice_positive": 0.0,
+        "seg_iou_positive": 0.0,
+        "seg_pred_positive_ratio": 0.0,
+        "seg_target_positive_ratio": 0.0,
+        "seg_positive_mask_ratio": 0.0,
+    }
     batch_count = 0
     with torch.no_grad():
         for batch_count, batch in enumerate(dataloader, start=1):
@@ -278,22 +312,32 @@ def balanced_sampler(dataset: MultitaskQADataset, enabled: bool):
     return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
 
-def save_checkpoint(model: VLM, output_dir: Path, step: int, epoch: int, metadata: dict[str, Any]) -> None:
+def save_checkpoint(
+    model: VLM,
+    output_dir: Path,
+    step: int,
+    epoch: int,
+    metadata: dict[str, Any],
+    optimizer: torch.optim.Optimizer | None = None,
+    scheduler: Any | None = None,
+) -> None:
     checkpoint_dir = output_dir / f"checkpoint-step-{step}"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "step": step,
-            "epoch": epoch,
-            "vision_name": model.vision_name,
-            "llm_name": model.llm_name,
-            "num_query_tokens": model.num_query_tokens,
-            "task_tokens": model.task_tokens,
-            **metadata,
-        },
-        checkpoint_dir / "pytorch_model.pt",
-    )
+    payload = {
+        "model_state_dict": model.state_dict(),
+        "step": step,
+        "epoch": epoch,
+        "vision_name": model.vision_name,
+        "llm_name": model.llm_name,
+        "num_query_tokens": model.num_query_tokens,
+        "task_tokens": model.task_tokens,
+        **metadata,
+    }
+    if optimizer is not None:
+        payload["optimizer_state_dict"] = optimizer.state_dict()
+    if scheduler is not None:
+        payload["scheduler_state_dict"] = scheduler.state_dict()
+    torch.save(payload, checkpoint_dir / "pytorch_model.pt")
     model.tokenizer.save_pretrained(checkpoint_dir / "tokenizer")
 
 
