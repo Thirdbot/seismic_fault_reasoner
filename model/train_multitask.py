@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 from pathlib import Path
 
@@ -21,6 +22,12 @@ from multitask import (
     to_device,
     trainable_parameters,
 )
+
+
+def log_metrics(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def main() -> None:
@@ -51,6 +58,7 @@ def main() -> None:
     parser.add_argument("--seg-loss-weight", type=float, default=1.0)
     parser.add_argument("--text-loss-weight", type=float, default=1.0)
     parser.add_argument("--balance-tasks", action="store_true")
+    parser.add_argument("--results-dir", type=Path, default=Path("results/multitask"))
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -126,6 +134,23 @@ def main() -> None:
     }
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    args.results_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = args.results_dir / "metrics.jsonl"
+    metrics_path.write_text("", encoding="utf-8")
+    log_metrics(metrics_path, {
+        "type": "config",
+        "training_mode": args.training_mode,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "grad_accum_steps": args.grad_accum_steps,
+        "max_steps": args.max_steps,
+        "lr": args.lr,
+        "balance_tasks": args.balance_tasks,
+        "train_records": len(train_dataset),
+        "val_records": len(val_dataset),
+        "trainable_parameters": trainable_count,
+        "total_parameters": total_count,
+    })
     global_step = 0
     optimizer.zero_grad(set_to_none=True)
     for epoch in range(1, args.epochs + 1):
@@ -145,15 +170,33 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             global_step += 1
             progress.set_postfix(loss=metrics["loss"], text=metrics["text_loss"], seg=metrics["seg_loss"])
+            log_metrics(metrics_path, {
+                "type": "train",
+                "epoch": epoch,
+                "step": global_step,
+                **metrics,
+            })
 
             if args.eval_every > 0 and global_step % args.eval_every == 0:
                 val_metrics = evaluate(model, val_loader, device, args.seg_loss_weight, args.text_loss_weight)
                 print(f"step={global_step} val={val_metrics}")
+                log_metrics(metrics_path, {
+                    "type": "val",
+                    "epoch": epoch,
+                    "step": global_step,
+                    **val_metrics,
+                })
             if args.save_every > 0 and global_step % args.save_every == 0:
                 save_checkpoint(model, args.output_dir, global_step, epoch, checkpoint_metadata)
             if args.max_steps > 0 and global_step >= args.max_steps:
                 val_metrics = evaluate(model, val_loader, device, args.seg_loss_weight, args.text_loss_weight)
                 print(f"max_steps reached at step={global_step}; val={val_metrics}")
+                log_metrics(metrics_path, {
+                    "type": "val",
+                    "epoch": epoch,
+                    "step": global_step,
+                    **val_metrics,
+                })
                 save_checkpoint(model, args.output_dir, global_step, epoch, checkpoint_metadata)
                 return
 
@@ -166,6 +209,12 @@ def main() -> None:
 
         val_metrics = evaluate(model, val_loader, device, args.seg_loss_weight, args.text_loss_weight)
         print(f"epoch={epoch} val={val_metrics}")
+        log_metrics(metrics_path, {
+            "type": "val",
+            "epoch": epoch,
+            "step": global_step,
+            **val_metrics,
+        })
         save_checkpoint(model, args.output_dir, global_step, epoch, checkpoint_metadata)
 
 
