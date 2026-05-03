@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from transformers import BitsAndBytesConfig
 
 from model import VLM
@@ -16,7 +16,7 @@ from model import VLM
 
 IGNORE_INDEX = -100
 SEGMENTATION_TASKS = {"fault_segmentation"}
-TEXT_TASK_TOKENS = {"[interp]", "[fault]"}
+DEFAULT_LORA_TARGETS = "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
 
 
 def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -196,6 +196,105 @@ def segmentation_metrics(logits: torch.Tensor, targets: torch.Tensor, threshold:
     dice = (2 * intersection / (pred_sum + target_sum).clamp_min(1)).item()
     iou = (intersection / union.clamp_min(1)).item()
     return {"seg_dice": dice, "seg_iou": iou}
+
+
+def to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    return {
+        key: value.to(device) if torch.is_tensor(value) else value
+        for key, value in batch.items()
+    }
+
+
+def compute_multitask_loss(
+    model: VLM,
+    batch: dict[str, Any],
+    seg_loss_weight: float = 1.0,
+    text_loss_weight: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    if (batch["labels"] != IGNORE_INDEX).any():
+        text_loss = model(
+            pixel_values=batch["pixel_values"],
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+        ).loss
+    else:
+        text_loss = torch.zeros((), device=batch["pixel_values"].device)
+
+    seg_mask = batch["is_segmentation"]
+    if seg_mask.any():
+        seg_logits = model.segment(
+            batch["pixel_values"][seg_mask],
+            output_size=batch["masks"].shape[-2:],
+        )
+        seg_targets = batch["masks"][seg_mask].to(dtype=seg_logits.dtype)
+        seg_loss = F.binary_cross_entropy_with_logits(seg_logits, seg_targets) + dice_loss(seg_logits, seg_targets)
+        metrics = segmentation_metrics(seg_logits.detach(), seg_targets.detach())
+    else:
+        seg_loss = torch.zeros((), device=batch["pixel_values"].device)
+        metrics = {"seg_dice": 0.0, "seg_iou": 0.0}
+
+    loss = text_loss_weight * text_loss + seg_loss_weight * seg_loss
+    metrics.update({
+        "loss": float(loss.detach().cpu()),
+        "text_loss": float(text_loss.detach().cpu()),
+        "seg_loss": float(seg_loss.detach().cpu()),
+    })
+    return loss, metrics
+
+
+def evaluate(
+    model: VLM,
+    dataloader: DataLoader,
+    device: torch.device,
+    seg_loss_weight: float = 1.0,
+    text_loss_weight: float = 1.0,
+) -> dict[str, float]:
+    model.eval()
+    totals = {"loss": 0.0, "text_loss": 0.0, "seg_loss": 0.0, "seg_dice": 0.0, "seg_iou": 0.0}
+    batch_count = 0
+    with torch.no_grad():
+        for batch_count, batch in enumerate(dataloader, start=1):
+            _, metrics = compute_multitask_loss(
+                model,
+                to_device(batch, device),
+                seg_loss_weight=seg_loss_weight,
+                text_loss_weight=text_loss_weight,
+            )
+            for key in totals:
+                totals[key] += metrics[key]
+    model.train()
+    return {key: value / max(batch_count, 1) for key, value in totals.items()}
+
+
+def balanced_sampler(dataset: MultitaskQADataset, enabled: bool):
+    if not enabled:
+        return None
+    counts: dict[str, int] = {}
+    for record in dataset.records:
+        token = record.get("task_token", "")
+        counts[token] = counts.get(token, 0) + 1
+    weights = [1.0 / counts[record.get("task_token", "")] for record in dataset.records]
+    return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+
+
+def save_checkpoint(model: VLM, output_dir: Path, step: int, epoch: int, metadata: dict[str, Any]) -> None:
+    checkpoint_dir = output_dir / f"checkpoint-step-{step}"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "step": step,
+            "epoch": epoch,
+            "vision_name": model.vision_name,
+            "llm_name": model.llm_name,
+            "num_query_tokens": model.num_query_tokens,
+            "task_tokens": model.task_tokens,
+            **metadata,
+        },
+        checkpoint_dir / "pytorch_model.pt",
+    )
+    model.tokenizer.save_pretrained(checkpoint_dir / "tokenizer")
 
 
 def build_qlora_config() -> BitsAndBytesConfig:

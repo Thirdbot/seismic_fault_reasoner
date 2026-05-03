@@ -1,118 +1,26 @@
 import argparse
+import math
 from pathlib import Path
-from typing import Any
 
 import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import CLIPImageProcessor, get_linear_schedule_with_warmup
 
 from multitask import (
+    DEFAULT_LORA_TARGETS,
     MultitaskCollator,
     MultitaskQADataset,
+    balanced_sampler,
     build_model,
+    compute_multitask_loss,
     count_trainable_parameters,
-    dice_loss,
-    optimizer_steps_per_epoch,
+    evaluate,
     parse_lora_targets,
-    segmentation_metrics,
+    save_checkpoint,
+    to_device,
     trainable_parameters,
 )
-
-
-def batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
-    return {
-        key: value.to(device) if torch.is_tensor(value) else value
-        for key, value in batch.items()
-    }
-
-
-def compute_losses(
-    model,
-    batch: dict[str, Any],
-    seg_loss_weight: float,
-    text_loss_weight: float,
-) -> tuple[torch.Tensor, dict[str, float]]:
-    has_text_labels = (batch["labels"] != -100).any()
-    if has_text_labels:
-        text_outputs = model(
-            pixel_values=batch["pixel_values"],
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            labels=batch["labels"],
-        )
-        text_loss = text_outputs.loss
-    else:
-        text_loss = torch.zeros((), device=batch["pixel_values"].device)
-
-    seg_mask = batch["is_segmentation"]
-    if seg_mask.any():
-        seg_logits = model.segment(
-            batch["pixel_values"][seg_mask],
-            output_size=batch["masks"].shape[-2:],
-        )
-        seg_targets = batch["masks"][seg_mask].to(dtype=seg_logits.dtype)
-        bce = F.binary_cross_entropy_with_logits(seg_logits, seg_targets)
-        d_loss = dice_loss(seg_logits, seg_targets)
-        seg_loss = bce + d_loss
-        metrics = segmentation_metrics(seg_logits.detach(), seg_targets.detach())
-    else:
-        seg_loss = torch.zeros((), device=batch["pixel_values"].device)
-        metrics = {"seg_dice": 0.0, "seg_iou": 0.0}
-
-    total_loss = text_loss_weight * text_loss + seg_loss_weight * seg_loss
-    metrics.update({
-        "loss": float(total_loss.detach().cpu()),
-        "text_loss": float(text_loss.detach().cpu()),
-        "seg_loss": float(seg_loss.detach().cpu()),
-    })
-    return total_loss, metrics
-
-
-def evaluate(model, dataloader: DataLoader, device: torch.device, seg_loss_weight: float, text_loss_weight: float) -> dict[str, float]:
-    model.eval()
-    totals = {"loss": 0.0, "text_loss": 0.0, "seg_loss": 0.0, "seg_dice": 0.0, "seg_iou": 0.0}
-    batches = 0
-    with torch.no_grad():
-        for batch in dataloader:
-            batch = batch_to_device(batch, device)
-            _, metrics = compute_losses(model, batch, seg_loss_weight, text_loss_weight)
-            for key in totals:
-                totals[key] += metrics[key]
-            batches += 1
-    model.train()
-    return {key: value / max(batches, 1) for key, value in totals.items()}
-
-
-def save_checkpoint(model, output_dir: Path, step: int, epoch: int, metadata: dict[str, Any]) -> None:
-    checkpoint_dir = output_dir / f"checkpoint-step-{step}"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "step": step,
-            "epoch": epoch,
-            "vision_name": model.vision_name,
-            "llm_name": model.llm_name,
-            "num_query_tokens": model.num_query_tokens,
-            "task_tokens": model.task_tokens,
-            **metadata,
-        },
-        checkpoint_dir / "pytorch_model.pt",
-    )
-    model.tokenizer.save_pretrained(checkpoint_dir / "tokenizer")
-
-
-def make_sampler(dataset: MultitaskQADataset, balance_tasks: bool):
-    if not balance_tasks:
-        return None
-    counts: dict[str, int] = {}
-    for record in dataset.records:
-        token = record.get("task_token", "")
-        counts[token] = counts.get(token, 0) + 1
-    weights = [1.0 / counts[record.get("task_token", "")] for record in dataset.records]
-    return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
 
 def main() -> None:
@@ -126,7 +34,7 @@ def main() -> None:
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
-    parser.add_argument("--lora-target-modules", default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj")
+    parser.add_argument("--lora-target-modules", default=DEFAULT_LORA_TARGETS)
     parser.add_argument("--gradient-checkpointing", action="store_true")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -169,7 +77,7 @@ def main() -> None:
     )
     train_dataset = MultitaskQADataset(args.train_jsonl)
     val_dataset = MultitaskQADataset(args.val_jsonl)
-    sampler = make_sampler(train_dataset, args.balance_tasks)
+    sampler = balanced_sampler(train_dataset, args.balance_tasks)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -186,8 +94,7 @@ def main() -> None:
         collate_fn=collator,
     )
 
-    steps_per_epoch = optimizer_steps_per_epoch(len(train_loader), args.grad_accum_steps)
-    total_update_steps = max(1, steps_per_epoch * args.epochs)
+    total_update_steps = max(1, math.ceil(len(train_loader) * args.epochs / args.grad_accum_steps))
     trainable_count, total_count = count_trainable_parameters(model)
     print(
         "training config: "
@@ -224,8 +131,8 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         progress = tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}")
         for micro_step, batch in enumerate(progress, start=1):
-            batch = batch_to_device(batch, device)
-            loss, metrics = compute_losses(model, batch, args.seg_loss_weight, args.text_loss_weight)
+            batch = to_device(batch, device)
+            loss, metrics = compute_multitask_loss(model, batch, args.seg_loss_weight, args.text_loss_weight)
             (loss / args.grad_accum_steps).backward()
 
             if micro_step % args.grad_accum_steps != 0:

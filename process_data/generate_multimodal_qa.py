@@ -20,15 +20,7 @@ TASK_TOKENS = {
     "fault_segmentation": "[seg]",
     "interpret_caption": "[interp]",
     "interpret_context": "[interp]",
-    "llamaindex_interpretation": "[interp]",
 }
-
-INTERPRETATION_QUESTION_PROMPT = """
-Generate geoscience training questions for the provided Smeaheia report figure/table.
-The questions must be answerable from the caption and nearby report context.
-Prefer questions about seismic interpretation, faults, structure, storage context,
-well evidence, or map/section meaning. Avoid generic document-summary questions.
-"""
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -215,113 +207,6 @@ def build_template_interpretation_qa(
     return qa_records
 
 
-def make_llamaindex_llm(model: str, temperature: float):
-    try:
-        from llama_index.llms.openai import OpenAI
-    except ImportError as exc:
-        raise ImportError(
-            "LlamaIndex OpenAI integration is not installed. Install project dependencies "
-            "and set OPENAI_API_KEY, or run with --generator template."
-        ) from exc
-
-    return OpenAI(model=model, temperature=temperature)
-
-
-def llamaindex_pairs_for_record(
-    record: dict[str, Any],
-    llm: Any,
-    questions_per_media: int,
-    max_context_chars: int,
-) -> list[tuple[str, str]]:
-    try:
-        from llama_index.core import Document
-        from llama_index.core.llama_dataset.generator import RagDatasetGenerator
-    except ImportError as exc:
-        raise ImportError(
-            "LlamaIndex is not installed. Install project dependencies or run with --generator template."
-        ) from exc
-
-    document = Document(
-        text=media_context(record, max_context_chars),
-        metadata={
-            "doc_id": record.get("doc_id"),
-            "element_id": record.get("element_id"),
-            "image_path": record.get("image_path"),
-            "caption": record.get("caption", ""),
-        },
-    )
-    generator = RagDatasetGenerator.from_documents(
-        [document],
-        llm=llm,
-        num_questions_per_chunk=questions_per_media,
-        question_gen_query=INTERPRETATION_QUESTION_PROMPT,
-        show_progress=False,
-    )
-    dataset = generator.generate_dataset_from_nodes(num=questions_per_media)
-    data = dataset.model_dump() if hasattr(dataset, "model_dump") else dataset.dict()
-
-    if "examples" in data:
-        pairs = []
-        for example in data["examples"]:
-            question = example.get("query") or example.get("question")
-            answer = example.get("reference_answer") or example.get("answer") or ""
-            if question and answer:
-                pairs.append((question, answer))
-        return pairs
-
-    queries = data.get("queries", {})
-    responses = data.get("responses", {})
-    return [(query, responses.get(query_id, "")) for query_id, query in queries.items() if responses.get(query_id)]
-
-
-def build_llamaindex_interpretation_qa(
-    interpretation_root: Path,
-    val_fraction: float,
-    model: str,
-    temperature: float,
-    questions_per_media: int,
-    max_context_chars: int,
-) -> list[dict[str, Any]]:
-    llm = make_llamaindex_llm(model=model, temperature=temperature)
-    qa_records = []
-
-    for record in tqdm(collect_media_records(interpretation_root), desc="LlamaIndex interpretation QA"):
-        key = f"interpretation:{record.get('doc_id')}:{record.get('element_id')}"
-        split = split_name(key, val_fraction)
-        metadata = {
-            "doc_id": record.get("doc_id"),
-            "element_id": record.get("element_id"),
-            "media_type": record.get("type"),
-            "page": record.get("page"),
-            "section_path": record.get("section_path", []),
-            "caption": record.get("caption", ""),
-            "generator": "llama-index",
-            "llm_model": model,
-        }
-
-        for idx, (question, answer) in enumerate(
-            llamaindex_pairs_for_record(record, llm, questions_per_media, max_context_chars),
-            start=1,
-        ):
-            token = TASK_TOKENS["llamaindex_interpretation"]
-            qa_records.append({
-                "id": stable_id("interpretation", "llama-index", record.get("doc_id"), record.get("element_id"), idx),
-                "split": split,
-                "dataset": "seismic_interpretation",
-                "task": "llamaindex_interpretation",
-                "task_token": token,
-                "modality": "report_media_text",
-                "image_path": record.get("image_path"),
-                "mask_path": None,
-                "question": question,
-                "answer": answer,
-                "messages": messages(question, record.get("image_path"), token) + [{"role": "assistant", "content": answer}],
-                "metadata": metadata,
-            })
-
-    return qa_records
-
-
 def save_outputs(records: list[dict[str, Any]], output_dir: Path) -> None:
     write_jsonl(output_dir / "all.jsonl", records)
     write_jsonl(output_dir / "train.jsonl", [record for record in records if record["split"] == "train"])
@@ -348,10 +233,6 @@ def main() -> None:
     parser.add_argument("--fault-info", type=Path, default=Path("process_data/fault_detection/data/info.jsonl"))
     parser.add_argument("--interpretation-root", type=Path, default=Path("process_data/interpretation"))
     parser.add_argument("--output-dir", type=Path, default=Path("process_data/multimodal_qa"))
-    parser.add_argument("--generator", choices=["llama-index", "template"], default="llama-index")
-    parser.add_argument("--llm-model", default="gpt-4o-mini")
-    parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--questions-per-media", type=int, default=2)
     parser.add_argument("--max-context-chars", type=int, default=5000)
     parser.add_argument("--val-fraction", type=float, default=0.15)
     parser.add_argument("--fault-only", action="store_true")
@@ -363,25 +244,13 @@ def main() -> None:
         records.extend(build_fault_qa(args.fault_info, args.val_fraction))
 
     if not args.fault_only:
-        if args.generator == "llama-index":
-            records.extend(
-                build_llamaindex_interpretation_qa(
-                    interpretation_root=args.interpretation_root,
-                    val_fraction=args.val_fraction,
-                    model=args.llm_model,
-                    temperature=args.temperature,
-                    questions_per_media=args.questions_per_media,
-                    max_context_chars=args.max_context_chars,
-                )
+        records.extend(
+            build_template_interpretation_qa(
+                interpretation_root=args.interpretation_root,
+                val_fraction=args.val_fraction,
+                max_context_chars=args.max_context_chars,
             )
-        else:
-            records.extend(
-                build_template_interpretation_qa(
-                    interpretation_root=args.interpretation_root,
-                    val_fraction=args.val_fraction,
-                    max_context_chars=args.max_context_chars,
-                )
-            )
+        )
 
     save_outputs(records, args.output_dir)
     print(f"wrote {len(records)} QA records to {args.output_dir}")
