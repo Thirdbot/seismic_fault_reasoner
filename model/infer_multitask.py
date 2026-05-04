@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from transformers import CLIPImageProcessor
+from transformers import AutoImageProcessor
 
 from multitask import (
     SEGMENTATION_TASKS,
@@ -65,7 +65,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_path = args.checkpoint or latest_checkpoint(args.checkpoint_root)
     model, checkpoint = load_checkpoint(checkpoint_path, device)
-    image_processor = CLIPImageProcessor.from_pretrained(model.vision_name)
+    image_processor = AutoImageProcessor.from_pretrained(model.vision_name)
 
     reference_answer = None
     record_task = None

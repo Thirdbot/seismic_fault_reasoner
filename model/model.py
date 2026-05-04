@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, CLIPVisionModel, Blip2QFormerConfig, Blip2QFormerModel
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel, Blip2QFormerConfig, Blip2QFormerModel
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -63,7 +63,7 @@ class UNetSegmentationDecoder(nn.Module):
 
 class VLM(nn.Module):
     def __init__(self,
-                    vision_name="openai/clip-vit-base-patch32",
+                    vision_name="facebook/dinov2-base",
                     llm_name="HuggingFaceTB/SmolLM-135M",
                     num_query_tokens=32,
                     task_tokens=DEFAULT_TASK_TOKENS,
@@ -78,7 +78,7 @@ class VLM(nn.Module):
         self.task_tokens = tuple(task_tokens)
 
         #define encoder
-        self.vision_encoder = CLIPVisionModel.from_pretrained(self.vision_name)
+        self.vision_encoder = AutoModel.from_pretrained(self.vision_name)
         #define tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.llm_name, trust_remote_code=True)
         # define llm

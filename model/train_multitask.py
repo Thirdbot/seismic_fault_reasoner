@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import CLIPImageProcessor, get_linear_schedule_with_warmup
+from transformers import AutoImageProcessor, get_linear_schedule_with_warmup
 
 from multitask import (
     DEFAULT_LORA_TARGETS,
@@ -37,7 +37,7 @@ def main() -> None:
     parser.add_argument("--train-jsonl", type=Path, default=Path("process_data/multimodal_qa/train.jsonl"))
     parser.add_argument("--val-jsonl", type=Path, default=Path("process_data/multimodal_qa/val.jsonl"))
     parser.add_argument("--output-dir", type=Path, default=Path("model/checkpoints/multitask"))
-    parser.add_argument("--vision-name", default="openai/clip-vit-base-patch32")
+    parser.add_argument("--vision-name", default="facebook/dinov2-base")
     parser.add_argument("--llm-name", default="HuggingFaceTB/SmolLM-135M")
     parser.add_argument("--training-mode", choices=["qlora", "frozen"], default="qlora")
     parser.add_argument("--lora-r", type=int, default=16)
@@ -81,7 +81,7 @@ def main() -> None:
     )
     model.train()
 
-    image_processor = CLIPImageProcessor.from_pretrained(args.vision_name)
+    image_processor = AutoImageProcessor.from_pretrained(args.vision_name)
     collator = MultitaskCollator(
         tokenizer=model.tokenizer,
         image_processor=image_processor,

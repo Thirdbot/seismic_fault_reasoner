@@ -507,7 +507,7 @@ def latest_checkpoint(root: Path) -> Path:
 def load_checkpoint(path: Path, device: torch.device) -> tuple[VLM, dict[str, Any]]:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     model = VLM(
-        vision_name=checkpoint.get("vision_name", "openai/clip-vit-base-patch32"),
+        vision_name=checkpoint.get("vision_name", "facebook/dinov2-base"),
         llm_name=checkpoint.get("llm_name", "Qwen/Qwen2.5-0.5B-Instruct"),
         num_query_tokens=checkpoint.get("num_query_tokens", 32),
         task_tokens=checkpoint.get("task_tokens", ("[interp]", "[fault]", "[seg]")),
